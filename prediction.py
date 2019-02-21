@@ -22,45 +22,57 @@ import pandas as pd # data processing, CSV file I/O (e.g. pd.read_csv)
 # For example, running this (by clicking run or pressing Shift+Enter) will list the files in the input directory
 
 
-def stateful_prediction( mm, X_all,X_test, X6_testi, ntarget=1):
+def stateful_prediction( mm,X_test, ntarget=1):
         #expecting..
-        [X1_all,X2_all,X3_all,X4_all,X5_all,X6_all] = X_all
-        [X1_test,X2_test,X3_test,X4_test,X5_test] = X_test
         bis = mm.layers[0].get_config()["batch_input_shape"]
         batch_size, ts, nfeat = bis
-        assert(X1_all.shape[0] % batch_size == 0)
-        assert(X1_all.shape[1] % ts == 0)
+        assert(X_test.shape[0] % batch_size == 0)
+        assert(X_test.shape[1] % ts == 0)
 
-        y_pred = np.zeros((X1_test.shape[0],X1_test.shape[1],ntarget))
-        y_pred[:] = np.NaN
-
-        for ipat in range(0,X1_test.shape[0],batch_size):
+        y_pred = np.zeros((X_test.shape[0],X_test.shape[1],ntarget))
+        #y_pred[:] = np.NaN
+        for ipat in range(0, X_test.shape[0],batch_size):
             mm.reset_states()
-
-            for itime in range(0,X1_all.shape[1] + X1_test.shape[1], ts):
-                #print("itime",  itime)
-                if itime < X1_all.shape[1]:
-                    X1_alli = X1_all[ipat:(ipat+batch_size),itime:(itime+ts),:]
-                    X2_alli = X2_all[ipat:(ipat+batch_size),itime:(itime+ts),:]
-                    X3_alli = X3_all[ipat:(ipat+batch_size),itime:(itime+ts),:]
-                    X4_alli = X5_all[ipat:(ipat+batch_size),itime:(itime+ts),:]
-                    X5_alli = X5_all[ipat:(ipat+batch_size),itime:(itime+ts),:]
-                    X6_alli = X6_all[ipat:(ipat+batch_size),itime:(itime+ts),:]
-
-                    X_alli = [X1_alli,X2_alli,X3_alli,X4_alli,X5_alli,X6_alli]
-
-                    mm.predict(X_alli,batch_size=batch_size, steps = None)
-                else:
-                    itime = itime - X1_all.shape[1]
-                    X1_testi = X1_test[ipat:(ipat+batch_size),itime:(itime+ts),:]
-                    X2_testi = X2_test[ipat:(ipat+batch_size),itime:(itime+ts),:]
-                    X3_testi = X3_test[ipat:(ipat+batch_size),itime:(itime+ts),:]
-                    X4_testi = X5_test[ipat:(ipat+batch_size),itime:(itime+ts),:]
-                    X5_testi = X5_test[ipat:(ipat+batch_size),itime:(itime+ts),:]
-                    #X6_testi = X6_test[ipat:(ipat+batch_size),itime:(itime+ts),:]
-                    X_testi = [X1_testi,X2_testi,X3_testi,X4_testi,X5_testi,X6_testi]
-
-                    y_pred[ipat:(ipat+batch_size),itime:(itime+ts),:] = mm.predict(X_testi,batch_size = batch_size)
-
-                    X6_testi = y_pred[ipat:(ipat+batch_size),itime:(itime+ts),:]
+            x_next = X_test[ipat:(ipat+batch_size),0,:]
+            x_next = x_next.reshape( x_next.shape[0], 1, x_next.shape[1])
+            #print("x_next", x_next.shape)
+            for itime in range(0, X_test.shape[1], ts):
+                y_pred[ipat:(ipat+batch_size),itime:(itime+ts),:] = mm.predict(x_next,batch_size = batch_size)
+                y_pred_temp =  np.squeeze(y_pred[ipat:(ipat+batch_size),itime:(itime+ts),:])
+                y_pred_temp= y_pred_temp.reshape((batch_size ,1))
+                #print( X_testi[:,:,0].shape, y_pred_temp.shape)
+                #sys.exit()
+                try:
+                    x_next = X_test[ipat:(ipat+batch_size),(itime+ts):(itime+2*ts),:]
+                    #print("x_next", x_next.shape)
+                    x_next[:,:,0] = y_pred_temp#y_pred[ipat:(ipat+batch_size),itime:(itime+ts),:][:,:]
+                    #print("x_next3",x_next.shape )
+                except IndexError:
+                    pass
         return y_pred
+
+def stateless_prediction(mm, X_test, batch_size):
+    n_time = X_test.shape[1]
+    y_pred = np.zeros((X_test.shape[0],X_test.shape[1],1))
+    x_next = X_test[:,0]
+
+    for i in range(0, n_time):
+        #mm.reset_states()
+        x_arr = x_next.reshape( x_next.shape[0], 1, x_next.shape[1] )
+        #print(x_arr.shape)
+        #print(y_pred[:,i,:].shape)
+        y_pred_temp = mm.predict(x_arr,batch_size = batch_size) # input for prediction must be 2d, output is immediately extracted from 2d to 1d
+        #print(x_arr[:5])
+        #print(y_pred_temp.shape, y_pred_temp)
+        y_pred[:,i,:] = np.squeeze(y_pred_temp).reshape((500,1))
+        #print(y_pred[:,i,:] ,y_pred[:,i,:].shape)
+        #sys.exit()
+        try:
+            x_next = X_test[:,i+1]
+            x_next[:,0] = np.squeeze(y_pred_temp)
+            #print(x_next.shape )
+            #sys.exit()
+        except IndexError:
+            pass  # this happens on last iteration, and x_next does not matter anymore
+
+    return y_pred

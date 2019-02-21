@@ -4,6 +4,7 @@ import os, sys, time, math, json, random
 import matplotlib.pyplot as plt
 #from keras.utils import np_utils
 #%matplotlib inline
+import pandas as pd
 import tensorflow as tf
 from keras.backend.tensorflow_backend import set_session
 import keras
@@ -14,7 +15,8 @@ from keras.layers.embeddings import Embedding
 import warnings
 from keras import models, layers
 import numpy as np # linear algebra
-import pandas as pd # data processing, CSV file I/O (e.g. pd.read_csv)
+ # data processing, CSV file I/O (e.g. pd.read_csv)
+from sklearn.preprocessing import MinMaxScaler
 
 warnings.filterwarnings("ignore")
 print("python {}".format(sys.version))
@@ -32,142 +34,114 @@ def set_seed(sd=123): #define seed for consistent output
     ## tensor flow's random number
     set_random_seed(sd)
 #set_seed(sd=123)
+import sys
+from itertools import product, starmap
 
-def expand_df(df):
-    data = df.copy()
-    data['day'] = data.index.day
-    data['month'] = data.index.month
-    data['year'] = data.index.year
-    data['dayofweek'] = data.index.dayofweek
-    return data
+def storeitems():
+    return product(range(1,51), range(1,11))
 
 
-def generate_data(data):
-    data = expand_df(data)
-    items_id = data.groupby('item')['sales'].apply(list).index
-    items_sales = data.groupby('item')['sales'].apply(list)#.series
-
-    stores_id  = data.groupby('store')['item'].apply(list).index
-    items_stores = data.groupby('item')['store'].apply(list)
-
-    items_day = data.groupby('item')['day'].apply(list)
-    items_month = data.groupby('item')['month'].apply(list)
-    items_dayofweek = data.groupby('item')['dayofweek'].apply(list)
-
-    item_len = len(items_id)
-    store_len = len(stores_id)
-    day_len = 31
-    month_len = 12
-    week_len = 7
+def storeitems_column_names():
+    return list(starmap(lambda i,s: f'item_{i}_store_{s}_sales', storeitems()))
 
 
-    N = item_len #50
-    print(N)
-    #sys.exit()
-    T = len( items_day[1])  #int( len( items_day[1]) / len(stores_id) ) #18620
-    D = 1
-
-    X1 = np.zeros((N,T,1))
-    X2 = np.zeros((N,T,1))
-    X3 = np.zeros((N,T,1))
-    X4 = np.zeros((N,T,1))
-    X5 = np.zeros((N,T,1))
-
-    y = np.zeros((N,T,D))
-
-    for i,sku in enumerate(items_id):
-        day = items_day[sku]
-        month = items_month[sku]
-        dayofweek = items_dayofweek[sku]
-        stores = items_stores[sku]#np.array(items_stores[sku])
-        #print(stores)
-        #stores = stores.reshape( (18260,1))
-        sales = items_sales[sku]
-        #print(type(day),len(sales))
+def sales_by_storeitem(df):
+    ret = pd.DataFrame(index=df.index.unique())
+    for i, s in storeitems():
+        #print(i,s)
         #sys.exit()
 
+        ret[f'item_{i}_store_{s}_sales'] = df[(df['item'] == i) & (df['store'] == s)]['sales'].values
+        #print( ret)
+    return ret
+
+def shift_series(series, days):
+    return series.transform(lambda x: x.shift(days))
+
+
+def shift_series_in_df(df, series_names=[], days_delta=90):
+    ret = pd.DataFrame(index=df.index.copy())
+    str_sgn = 'future' if np.sign(days_delta) < 0 else 'past'
+    for sn in series_names:
+        ret[f'{sn}_{str_sgn}_{np.abs(days_delta)}'] = shift_series(df[sn], days_delta)
+    return ret
+
+
+def stack_shifted_sales(df, days_deltas=[1, 90, 360]):
+    names = storeitems_column_names()
+    dfs = [df.copy()]
+    #print(dfs)
+    #sys.exit()
+    for delta in days_deltas:
+        shifted = shift_series_in_df(df, series_names=names, days_delta=delta)
+        #print(shifted.shape)
+        #sys.exit()
+        dfs.append(shifted)
+    return pd.concat(dfs, axis=1, sort=False, copy=False)
+
+def generate_data(df_train, df_test ):
+    df_train.index = pd.to_datetime(df_train['date'])
+    df_train.drop('date', axis=1, inplace=True)
+    df_train = sales_by_storeitem(df_train)
+
+    df_test.index = pd.to_datetime(df_test['date'])
+    df_test.drop('date', axis=1, inplace=True)
+    df_test['sales'] = np.zeros(df_test.shape[0])
+    df_test = sales_by_storeitem(df_test)
+
+    col_names = list(zip(df_test.columns, df_train.columns))  #('item_1_store_1_sales', 'item_1_store_1_sales')
+    for cn in col_names:
+        assert cn[0] == cn[1]
+
+    df_test['is_test'] = np.repeat(True, df_test.shape[0])
+    df_train['is_test'] = np.repeat(False, df_train.shape[0])
+    df_total = pd.concat([df_train, df_test])
+    weekday_df = pd.get_dummies(df_total.index.weekday, prefix='weekday')
+    weekday_df.index = df_total.index
+    month_df = pd.get_dummies(df_total.index.month, prefix='month')
+    month_df.index =  df_total.index
+    df_total = pd.concat([weekday_df, month_df, df_total], axis=1)
+    assert df_total.isna().any().any() == False
+    df_total = stack_shifted_sales(df_total, days_deltas=[1])
+    df_total.dropna(inplace=True)
+    sales_cols = [col for col in df_total.columns if '_sales' in col and '_sales_' not in col]
+    stacked_sales_cols = [col for col in df_total.columns if '_sales_' in col]
+    other_cols = [col for col in df_total.columns if col not in set(sales_cols) and col not in set(stacked_sales_cols)]
+
+    sales_cols = sorted(sales_cols)
+    stacked_sales_cols = sorted(stacked_sales_cols)
+
+    new_cols = other_cols + stacked_sales_cols + sales_cols
+    df_total = df_total.reindex(columns=new_cols)
+    assert df_total.isna().any().any() == False
+    scaler = MinMaxScaler(feature_range=(0,1))
+    cols_to_scale = [col for col in df_total.columns if 'weekday' not in col and 'month' not in col and "is_test" not in col]
+    scaled_cols = scaler.fit_transform(df_total[cols_to_scale])
+    df_total[cols_to_scale] = scaled_cols
+    df_train = df_total[df_total['is_test'] == False].drop('is_test', axis=1)
+    df_test = df_total[df_total['is_test'] == True].drop('is_test', axis=1)
+
+    X_cols_stacked = [col for col in df_train.columns if '_past_' in col]
+    X_cols_caldata = [col for col in df_train.columns if 'weekday_' in col or 'month_' in col or 'year' in col]
+    X_cols = X_cols_stacked + X_cols_caldata
+
+    X = df_train[X_cols]
+    y_cols = [col for col in df_train.columns if col not in X_cols]
+    y = df_train[y_cols]
+    X_test = df_test[X_cols]
+    return X, y, X_test, scaler, df_train, df_test, cols_to_scale, y_cols
+
+
+def ts_data(N,T,D,X):
+    X = X.transpose()
+    x = np.zeros((N,T,D))
+    for n in range(N+19):
         for t in range(T):
-            X1[i,t] = str(sku-1)
-            X2[i,t] = str(stores[t]-1)
-            X3[i,t] = str(day[t]-1)
-            X4[i,t] = str(month[t]-1)
-            X5[i,t] = str(dayofweek[t])
-            y[i,t] = sales[t]
-            #print(str(X2[i,t]), type(str(X2[i,t])))
-            #print(str(X3[i,t]), type(str(X3[i,t])))
-            #print(str(X4[i,t]), type(str(X4[i,t])))
-            #print(str(X5[i,t]), type(str(X5[i,t])))
-            #print((y[i,t]), type((y[i,t])))
-            #sys.exit()
-
-    y_avg = np.mean(y, axis = 1)
-    y = np.array([y[i]/y_avg[i] for i in range(y.shape[0]) ]) #scale sales data by dividing the average sale of each item
-    prop_train = 0.80
-    ntrain = int(X1.shape[1]*prop_train)+2
-
-    X1_train, X1_val = X1[:,:ntrain], X1[:,ntrain:]
-    X2_train, X2_val = X2[:,:ntrain], X2[:,ntrain:]
-    X3_train, X3_val = X3[:,:ntrain], X3[:,ntrain:]
-    X4_train, X4_val = X4[:,:ntrain], X4[:,ntrain:]
-    X5_train, X5_val = X5[:,:ntrain], X5[:,ntrain:]
-    y_train, y_val = y[:,:ntrain], y[:,ntrain:]
-    X6_train, X6_val = np.zeros_like(y_train), np.zeros_like(y_val) # y[:,:ntrain-1],  y[:,ntrain-1:-1]
-    X6_train[:,0] = np.mean(y, axis = 1)
-    X6_train[:,1:] = y[:,:ntrain-1]
-    X6_val[:] = y[:,ntrain-1:-1]
-    X6 = np.hstack((X6_train, X6_val ))
-    return (X1,X2, X3, X4, X5, X6, y ), (X1_train,X2_train,X3_train,X4_train,X5_train,X6_train, y_train ),(X1_val,X2_val,X3_val,X4_val,X5_val,X6_val,y_val),y_avg
-
-def generate_test_data(data):
-    #y = np.zeros((N,T,D))
-    data = expand_df(data)
-    items_id = data.groupby('item')['store'].apply(list).index
-    #items_sales = data.groupby('item')['sales'].apply(list)#.series
-
-    stores_id  = data.groupby('store')['item'].apply(list).index
-
-    items_stores = data.groupby('item')['store'].apply(list)
-    items_day = data.groupby('item')['day'].apply(list)
-    items_month = data.groupby('item')['month'].apply(list)
-    items_dayofweek = data.groupby('item')['dayofweek'].apply(list)
-
-
-    item_len = len(items_id)
-    store_len = len(stores_id)
-    day_len = 31
-    month_len = 12
-    week_len = 7
-
-    N = item_len
-    T = len( items_day[1])
-    D = 1
-
-
-    X1 = np.zeros((N,T,1))
-    X2 = np.zeros((N,T,1))
-    X3 = np.zeros((N,T,1))
-    X4 = np.zeros((N,T,1))
-    X5 = np.zeros((N,T,1))
-
-    for i,sku in enumerate(items_id):
-
-        stores = items_stores[sku]
-        day = items_day[sku]
-        month = items_month[sku]
-        dayofweek = items_dayofweek[sku]
-        for t in range(T):
-            #X1[i,t] = sku-1
-            #X2[i,t] = stores[t]-1
-            #X3[i,t] = day[t]-1
-            #X4[i,t] = month[t]-1
-            #X5[i,t] = dayofweek[t]
-
-            X1[i,t] = str(sku-1)
-            X2[i,t] = str(stores[t]-1)
-            X3[i,t] = str(day[t]-1)
-            X4[i,t] = str(month[t]-1)
-            X5[i,t] = str(dayofweek[t])
-            #y[i,t] = sales[t]
-    #(X1_val,X2_val,X3_val,X4_val,X5_val,X6_val,y_val)
-
-    return (X1, X2, X3, X4, X5 )
+            if n<N:
+                x[n,t,0] = X.iloc[n][t]
+                #None
+            else:
+                for d in range(1,D):
+                    #print(n,t,d, n+d)
+                    x[:,t,d] = X.iloc[N+d-1][t]
+    return x
